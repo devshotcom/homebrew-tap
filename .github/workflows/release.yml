@@ -54,12 +54,19 @@ jobs:
 
       - name: Extract kernel + guest base from Docker image
         run: |
-          docker pull ${{ steps.vars.outputs.docker_image }}
-          CID=$(docker create ${{ steps.vars.outputs.docker_image }})
+          IMAGE="${{ steps.vars.outputs.docker_image }}"
+          VERSION="${{ steps.vars.outputs.version }}"
+
+          # Try version-tagged image first (arm64-<sha>), fall back to :arm64
+          docker pull "${IMAGE}" || { echo "Failed to pull ${IMAGE}"; exit 1; }
+
+          CID=$(docker create "${IMAGE}")
           docker cp "$CID:/xen/boot/Image-domu" ./Image-domu 2>/dev/null \
             || docker cp "$CID:/xen/Image" ./Image-domu
           docker cp "$CID:/xen/devshot-guest-base.qcow2" ./devshot-guest-base.qcow2
           docker rm "$CID"
+
+          echo "Extracted from ${IMAGE} for version ${VERSION}"
           ls -lh Image-domu devshot-guest-base.qcow2
 
       - name: Package tarball

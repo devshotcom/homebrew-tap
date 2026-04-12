@@ -2,7 +2,7 @@ class Devshot < Formula
   desc "Dev environment VMs with hardware-accelerated HVF on Mac"
   homepage "https://devshot.com"
   url "https://github.com/devshotcom/homebrew-tap/releases/download/v0.1.0/devshot-macos-arm64-qemu.tar.gz"
-  sha256 "e22619c79e946ac627cc2ed603e42e59d26debbd5ddfc2476c371804469fb43c"
+  sha256 "5d088e546b7f79a27a5eb84be1df0f6a63e33c63e978a8df11cecd87ea8e4108"
   license "MIT"
   version "0.1.0"
 
@@ -25,7 +25,7 @@ class Devshot < Formula
       case "${1:-help}" in
         run)
           shift
-          BUILD_DIR="#{var}/devshot"
+          export BUILD_DIR="#{var}/devshot"
           export DEVSHOT_SANDBOX_PROFILE="#{etc}/devshot/devshot-vmm-qemu.sb"
           mkdir -p "$BUILD_DIR"
           cp "#{libexec}/devshot-agent" "$BUILD_DIR/devshot-agent" 2>/dev/null || true

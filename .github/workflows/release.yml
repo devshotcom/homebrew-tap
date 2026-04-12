@@ -30,38 +30,21 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "version=${{ inputs.version }}" >> $GITHUB_OUTPUT
-            echo "ref=${{ inputs.ref }}" >> $GITHUB_OUTPUT
             echo "docker_image=${{ inputs.docker_image }}" >> $GITHUB_OUTPUT
           else
-            # Push event: extract version from Formula, ref from commit message
+            # Push event: extract version from Formula
             VERSION=$(grep 'version "' Formula/devshot.rb | head -1 | sed 's/.*version "//;s/"//')
-            REF=$(git log -1 --format=%s | grep -oP '[0-9a-f]{8}' | head -1 || echo "main")
             echo "version=${VERSION:-0.1.0}" >> $GITHUB_OUTPUT
-            echo "ref=${REF:-main}" >> $GITHUB_OUTPUT
             echo "docker_image=anticipatercom/devshot:arm64" >> $GITHUB_OUTPUT
           fi
 
       - name: Checkout homebrew-tap
         uses: actions/checkout@v4
 
-      - name: Checkout devshot monorepo
-        uses: actions/checkout@v4
-        with:
-          repository: devshotcom/devshot
-          ref: ${{ steps.vars.outputs.ref }}
-          path: devshot
-          token: ${{ secrets.DEVSHOT_PAT }}
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.25'
-
-      - name: Compile darwin/arm64 agent
+      - name: Verify precompiled agent exists
         run: |
-          cd devshot/apps/agent/go
-          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o devshot-agent .
-          ls -lh devshot-agent
+          ls -lh bin/devshot-agent
+          file bin/devshot-agent
 
       - name: Install Docker runtime
         run: brew install docker colima
@@ -88,11 +71,11 @@ jobs:
           TARBALL="devshot-macos-arm64-qemu.tar.gz"
 
           mkdir -p staging
-          cp devshot/apps/agent/go/devshot-agent      staging/
-          cp devshot/apps/agent/run-mac-qemu.sh        staging/
-          cp devshot/apps/agent/sandbox/devshot-vmm-qemu.sb staging/
-          cp Image-domu                                staging/
-          cp devshot-guest-base.qcow2                  staging/
+          cp bin/devshot-agent                   staging/
+          cp scripts/run-mac-qemu.sh             staging/
+          cp scripts/sandbox/devshot-vmm-qemu.sb staging/
+          cp Image-domu                          staging/
+          cp devshot-guest-base.qcow2            staging/
           chmod +x staging/run-mac-qemu.sh staging/devshot-agent
 
           cd staging && tar czf "../$TARBALL" . && cd ..

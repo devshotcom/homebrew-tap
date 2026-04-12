@@ -1,10 +1,12 @@
 name: Build & Release Mac Installer
 
-# Triggered by repository_dispatch from the monorepo's build-agent.yml.
-# The monorepo syncs the Formula first, then dispatches this event.
+# Triggers:
+#   1. Push to main (fired automatically when the monorepo's deploy job
+#      syncs Formula + workflow via git push)
+#   2. Manual (workflow_dispatch) for ad-hoc rebuilds
 on:
-  repository_dispatch:
-    types: [release-mac]
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       version:
@@ -26,14 +28,17 @@ jobs:
       - name: Resolve inputs
         id: vars
         run: |
-          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
-            echo "version=${{ github.event.client_payload.version }}" >> $GITHUB_OUTPUT
-            echo "ref=${{ github.event.client_payload.ref }}" >> $GITHUB_OUTPUT
-            echo "docker_image=${{ github.event.client_payload.docker_image }}" >> $GITHUB_OUTPUT
-          else
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "version=${{ inputs.version }}" >> $GITHUB_OUTPUT
             echo "ref=${{ inputs.ref }}" >> $GITHUB_OUTPUT
             echo "docker_image=${{ inputs.docker_image }}" >> $GITHUB_OUTPUT
+          else
+            # Push event: extract version from Formula, ref from commit message
+            VERSION=$(grep 'version "' Formula/devshot.rb | head -1 | sed 's/.*version "//;s/"//')
+            REF=$(git log -1 --format=%s | grep -oP '[0-9a-f]{8}' | head -1 || echo "main")
+            echo "version=${VERSION:-0.1.0}" >> $GITHUB_OUTPUT
+            echo "ref=${REF:-main}" >> $GITHUB_OUTPUT
+            echo "docker_image=anticipatercom/devshot:arm64" >> $GITHUB_OUTPUT
           fi
 
       - name: Checkout homebrew-tap

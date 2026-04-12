@@ -23,7 +23,7 @@ on:
 
 jobs:
   build-and-release:
-    runs-on: macos-14  # Apple Silicon runner
+    runs-on: ubuntu-latest
     steps:
       - name: Resolve inputs
         id: vars
@@ -107,9 +107,9 @@ jobs:
           VERSION=${{ steps.vars.outputs.version }}
           SHA=${{ steps.package.outputs.sha256 }}
 
-          sed -i '' "s|sha256 \".*\"|sha256 \"${SHA}\"|" Formula/devshot.rb
-          sed -i '' "s|url \".*\"|url \"https://github.com/devshotcom/homebrew-tap/releases/download/v${VERSION}/devshot-macos-arm64-qemu.tar.gz\"|" Formula/devshot.rb
-          sed -i '' "s|version \".*\"|version \"${VERSION}\"|" Formula/devshot.rb
+          sed -i "s|sha256 \".*\"|sha256 \"${SHA}\"|" Formula/devshot.rb
+          sed -i "s|url \".*\"|url \"https://github.com/devshotcom/homebrew-tap/releases/download/v${VERSION}/devshot-macos-arm64-qemu.tar.gz\"|" Formula/devshot.rb
+          sed -i "s|version \".*\"|version \"${VERSION}\"|" Formula/devshot.rb
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"

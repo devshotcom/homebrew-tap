@@ -1,0 +1,140 @@
+name: Build & Release Mac Installer
+
+# Triggered by repository_dispatch from the monorepo's build-agent.yml.
+# The monorepo syncs the Formula first, then dispatches this event.
+on:
+  repository_dispatch:
+    types: [release-mac]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. 0.1.0)'
+        required: true
+      ref:
+        description: 'Monorepo commit SHA to build from'
+        required: true
+        default: 'main'
+      docker_image:
+        description: 'Docker image to extract kernel + guest base from'
+        required: true
+        default: 'anticipatercom/devshot:arm64'
+
+jobs:
+  build-and-release:
+    runs-on: macos-14  # Apple Silicon runner
+    steps:
+      - name: Resolve inputs
+        id: vars
+        run: |
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            echo "version=${{ github.event.client_payload.version }}" >> $GITHUB_OUTPUT
+            echo "ref=${{ github.event.client_payload.ref }}" >> $GITHUB_OUTPUT
+            echo "docker_image=${{ github.event.client_payload.docker_image }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${{ inputs.version }}" >> $GITHUB_OUTPUT
+            echo "ref=${{ inputs.ref }}" >> $GITHUB_OUTPUT
+            echo "docker_image=${{ inputs.docker_image }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout homebrew-tap
+        uses: actions/checkout@v4
+
+      - name: Checkout devshot monorepo
+        uses: actions/checkout@v4
+        with:
+          repository: devshotcom/devshot
+          ref: ${{ steps.vars.outputs.ref }}
+          path: devshot
+          token: ${{ secrets.DEVSHOT_PAT }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Compile darwin/arm64 agent
+        run: |
+          cd devshot/apps/agent/go
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o devshot-agent .
+          ls -lh devshot-agent
+
+      - name: Install Docker runtime
+        run: brew install docker colima
+
+      - name: Start Colima
+        run: |
+          colima start --cpu 2 --memory 4 --arch aarch64
+          docker info
+
+      - name: Extract kernel + guest base from Docker image
+        run: |
+          docker pull ${{ steps.vars.outputs.docker_image }}
+          CID=$(docker create ${{ steps.vars.outputs.docker_image }})
+          docker cp "$CID:/xen/boot/Image-domu" ./Image-domu 2>/dev/null \
+            || docker cp "$CID:/xen/Image" ./Image-domu
+          docker cp "$CID:/xen/devshot-guest-base.qcow2" ./devshot-guest-base.qcow2
+          docker rm "$CID"
+          ls -lh Image-domu devshot-guest-base.qcow2
+
+      - name: Package tarball
+        id: package
+        run: |
+          VERSION=${{ steps.vars.outputs.version }}
+          TARBALL="devshot-macos-arm64-qemu.tar.gz"
+
+          mkdir -p staging
+          cp devshot/apps/agent/go/devshot-agent      staging/
+          cp devshot/apps/agent/run-mac-qemu.sh        staging/
+          cp devshot/apps/agent/sandbox/devshot-vmm-qemu.sb staging/
+          cp Image-domu                                staging/
+          cp devshot-guest-base.qcow2                  staging/
+          chmod +x staging/run-mac-qemu.sh staging/devshot-agent
+
+          cd staging && tar czf "../$TARBALL" . && cd ..
+
+          SHA=$(shasum -a 256 "$TARBALL" | awk '{print $1}')
+          echo "sha256=$SHA" >> $GITHUB_OUTPUT
+          echo "tarball=$TARBALL" >> $GITHUB_OUTPUT
+          echo "SHA256: $SHA"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=${{ steps.vars.outputs.version }}
+          TARBALL=${{ steps.package.outputs.tarball }}
+
+          gh release delete "v${VERSION}" --yes 2>/dev/null || true
+          git push origin ":refs/tags/v${VERSION}" 2>/dev/null || true
+
+          gh release create "v${VERSION}" "$TARBALL" \
+            --title "v${VERSION} — QEMU/HVF native Mac installer" \
+            --notes "## Install
+
+          \`\`\`bash
+          brew install devshotcom/tap/devshot
+          DEVSHOT_SERVER_ID=<id> DEVSHOT_HMAC_SECRET=<secret> devshot run
+          \`\`\`
+
+          **SHA256**: \`${{ steps.package.outputs.sha256 }}\`
+          Built from devshotcom/devshot@${{ steps.vars.outputs.ref }}"
+
+      - name: Update Formula SHA + version
+        run: |
+          VERSION=${{ steps.vars.outputs.version }}
+          SHA=${{ steps.package.outputs.sha256 }}
+
+          sed -i '' "s|sha256 \".*\"|sha256 \"${SHA}\"|" Formula/devshot.rb
+          sed -i '' "s|url \".*\"|url \"https://github.com/devshotcom/homebrew-tap/releases/download/v${VERSION}/devshot-macos-arm64-qemu.tar.gz\"|" Formula/devshot.rb
+          sed -i '' "s|version \".*\"|version \"${VERSION}\"|" Formula/devshot.rb
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/devshot.rb
+          git diff --cached --quiet && echo "Formula unchanged" && exit 0
+          git commit -m "Update formula to v${VERSION} (SHA: ${SHA:0:12})"
+          git push
+
+      - name: Stop Colima
+        if: always()
+        run: colima stop 2>/dev/null || true

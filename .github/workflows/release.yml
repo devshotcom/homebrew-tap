@@ -46,13 +46,8 @@ jobs:
           ls -lh bin/devshot-agent
           file bin/devshot-agent
 
-      - name: Install Docker runtime
-        run: brew install docker colima
-
-      - name: Start Colima
-        run: |
-          colima start --cpu 2 --memory 4 --arch aarch64
-          docker info
+      - name: Setup Docker
+        uses: docker/setup-docker-action@v4
 
       - name: Extract kernel + guest base from Docker image
         run: |
@@ -123,6 +118,3 @@ jobs:
           git commit -m "Update formula to v${VERSION} (SHA: ${SHA:0:12})"
           git push
 
-      - name: Stop Colima
-        if: always()
-        run: colima stop 2>/dev/null || true

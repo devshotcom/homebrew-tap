@@ -1,25 +1,15 @@
 name: Build & Release Mac Installer
 
-# Triggers:
-#   1. Push to main (fired automatically when the monorepo's deploy job
-#      syncs Formula + workflow via git push)
-#   2. Manual (workflow_dispatch) for ad-hoc rebuilds
+# Triggered on push to main (after monorepo deploy job syncs all files).
+# Everything needed is already in the repo — no Docker pull, no extraction.
 on:
   push:
     branches: [main]
   workflow_dispatch:
     inputs:
       version:
-        description: 'Release version (e.g. 0.1.0)'
+        description: 'Release version (e.g. 0.2.0)'
         required: true
-      ref:
-        description: 'Monorepo commit SHA to build from'
-        required: true
-        default: 'main'
-      docker_image:
-        description: 'Docker image to extract kernel + guest base from'
-        required: true
-        default: 'anticipatercom/devshot:arm64'
 
 permissions:
   contents: write
@@ -28,46 +18,27 @@ jobs:
   build-and-release:
     runs-on: ubuntu-latest
     steps:
-      - name: Resolve inputs
+      - name: Checkout homebrew-tap
+        uses: actions/checkout@v4
+
+      - name: Resolve version
         id: vars
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "version=${{ inputs.version }}" >> $GITHUB_OUTPUT
-            echo "docker_image=${{ inputs.docker_image }}" >> $GITHUB_OUTPUT
           else
-            # Push event: extract version from Formula
             VERSION=$(grep 'version "' Formula/devshot.rb | head -1 | sed 's/.*version "//;s/"//')
-            echo "version=${VERSION:-0.1.0}" >> $GITHUB_OUTPUT
-            echo "docker_image=anticipatercom/devshot:arm64" >> $GITHUB_OUTPUT
+            echo "version=${VERSION:-0.0.0}" >> $GITHUB_OUTPUT
           fi
 
-      - name: Checkout homebrew-tap
-        uses: actions/checkout@v4
-
-      - name: Verify precompiled agent exists
+      - name: Verify all artifacts exist
         run: |
-          ls -lh bin/devshot-agent
-          file bin/devshot-agent
-
-      - name: Setup Docker
-        uses: docker/setup-docker-action@v4
-
-      - name: Extract kernel + guest base from Docker image
-        run: |
-          IMAGE="${{ steps.vars.outputs.docker_image }}"
-          VERSION="${{ steps.vars.outputs.version }}"
-
-          # Try version-tagged image first (arm64-<sha>), fall back to :arm64
-          docker pull "${IMAGE}" || { echo "Failed to pull ${IMAGE}"; exit 1; }
-
-          CID=$(docker create "${IMAGE}")
-          docker cp "$CID:/xen/boot/Image-domu" ./Image-domu 2>/dev/null \
-            || docker cp "$CID:/xen/Image" ./Image-domu
-          docker cp "$CID:/xen/devshot-guest-base.qcow2" ./devshot-guest-base.qcow2
-          docker rm "$CID"
-
-          echo "Extracted from ${IMAGE} for version ${VERSION}"
-          ls -lh Image-domu devshot-guest-base.qcow2
+          echo "=== Agent binary ==="
+          ls -lh bin/devshot-agent && file bin/devshot-agent
+          echo "=== Boot artifacts ==="
+          ls -lh boot/Image-domu boot/devshot-guest-base.qcow2
+          echo "=== Scripts ==="
+          ls -lh scripts/run-mac-qemu.sh scripts/sandbox/devshot-vmm-qemu.sb
 
       - name: Package tarball
         id: package
@@ -76,11 +47,11 @@ jobs:
           TARBALL="devshot-macos-arm64-qemu.tar.gz"
 
           mkdir -p staging
-          cp bin/devshot-agent                   staging/
-          cp scripts/run-mac-qemu.sh             staging/
-          cp scripts/sandbox/devshot-vmm-qemu.sb staging/
-          cp Image-domu                          staging/
-          cp devshot-guest-base.qcow2            staging/
+          cp bin/devshot-agent                     staging/
+          cp scripts/run-mac-qemu.sh               staging/
+          cp scripts/sandbox/devshot-vmm-qemu.sb   staging/
+          cp boot/Image-domu                       staging/
+          cp boot/devshot-guest-base.qcow2         staging/
           chmod +x staging/run-mac-qemu.sh staging/devshot-agent
 
           cd staging && tar czf "../$TARBALL" . && cd ..
@@ -88,7 +59,7 @@ jobs:
           SHA=$(shasum -a 256 "$TARBALL" | awk '{print $1}')
           echo "sha256=$SHA" >> $GITHUB_OUTPUT
           echo "tarball=$TARBALL" >> $GITHUB_OUTPUT
-          echo "SHA256: $SHA"
+          echo "Version: $VERSION  SHA256: $SHA"
 
       - name: Create GitHub Release
         env:
@@ -105,21 +76,19 @@ jobs:
             --notes "## Install
 
           \`\`\`bash
-          brew install devshotcom/tap/devshot
+          brew upgrade devshot  # or: brew install devshotcom/tap/devshot
           DEVSHOT_SERVER_ID=<id> DEVSHOT_HMAC_SECRET=<secret> devshot run
           \`\`\`
 
-          **SHA256**: \`${{ steps.package.outputs.sha256 }}\`
-          Built from devshotcom/devshot@${{ steps.vars.outputs.ref }}"
+          **SHA256**: \`${{ steps.package.outputs.sha256 }}\`"
 
-      - name: Update Formula SHA + version
+      - name: Update Formula SHA
         run: |
           VERSION=${{ steps.vars.outputs.version }}
           SHA=${{ steps.package.outputs.sha256 }}
 
           sed -i "s|sha256 \".*\"|sha256 \"${SHA}\"|" Formula/devshot.rb
           sed -i "s|url \".*\"|url \"https://github.com/devshotcom/homebrew-tap/releases/download/v${VERSION}/devshot-macos-arm64-qemu.tar.gz\"|" Formula/devshot.rb
-          sed -i "s|version \".*\"|version \"${VERSION}\"|" Formula/devshot.rb
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -127,4 +96,3 @@ jobs:
           git diff --cached --quiet && echo "Formula unchanged" && exit 0
           git commit -m "Update formula to v${VERSION} (SHA: ${SHA:0:12})"
           git push
-

@@ -80,83 +80,123 @@ else
   echo "  Expected at: ${SANDBOX_PROFILE}"
 fi
 
-# ── Copy artifacts to working dir ──────────────────────────────────────────
-cp "${BUILD_DIR}/Image-domu" "${WORK_DIR}/Image-domu" 2>/dev/null || true
-cp "${BUILD_DIR}/devshot-guest-base.qcow2" "${WORK_DIR}/devshot-guest-base.qcow2" 2>/dev/null || true
+# ── Copy boot artifacts to working dir ─────────────────────────────────────
+# Pool VM kernel + base image go into boot/ (shared with orchestrator via 9p)
+BOOT_DIR="${WORK_DIR}/boot"
+mkdir -p "${BOOT_DIR}"
+cp "${BUILD_DIR}/Image-domu" "${BOOT_DIR}/Image-domu" 2>/dev/null || true
+cp "${BUILD_DIR}/devshot-guest-base.qcow2" "${BOOT_DIR}/devshot-guest-base.qcow2" 2>/dev/null || true
 
-# Copy agent binary
-if [ -f "${BUILD_DIR}/devshot-agent" ]; then
-  cp "${BUILD_DIR}/devshot-agent" "${WORK_DIR}/agent"
-  chmod +x "${WORK_DIR}/agent"
-elif [ -f "${SCRIPT_DIR}/go/devshot-agent" ]; then
-  cp "${SCRIPT_DIR}/go/devshot-agent" "${WORK_DIR}/agent"
-  chmod +x "${WORK_DIR}/agent"
+# Orchestrator qcow2 image (Alpine + agent + QEMU + ClamAV + YARA)
+ORCH_BASE="${BUILD_DIR}/orchestrator-mac.qcow2"
+ORCH_DISK="${WORK_DIR}/orchestrator.qcow2"
+if [ ! -f "$ORCH_BASE" ]; then
+  echo "ERROR: Missing orchestrator image at ${ORCH_BASE}"
+  echo "  Build with: cd apps/agent && docker buildx build --platform linux/arm64 \\"
+  echo "    -f docker/Dockerfile.orchestrator-mac -o type=local,dest=.build/orchestrator ."
+  exit 1
+fi
+# Create CoW overlay so the base image stays clean across restarts
+if [ ! -f "$ORCH_DISK" ]; then
+  qemu-img create -f qcow2 -b "$ORCH_BASE" -F qcow2 "$ORCH_DISK"
 fi
 
-# ── Status banner ──────────────────────────────────────────────────────────
+# ── Orchestrator VM sizing ─────────────────────────────────────────────────
 CPU_MODEL=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo 'Apple Silicon')
 TOTAL_RAM_MB=$(( $(sysctl -n hw.memsize) / 1024 / 1024 ))
 CPU_CORES=$(sysctl -n hw.ncpu)
+# Give the orchestrator VM 75% of host RAM (capped at 16GB), leave rest for host
+ORCH_RAM_MB=$(( TOTAL_RAM_MB * 3 / 4 ))
+[ "$ORCH_RAM_MB" -gt 16384 ] && ORCH_RAM_MB=16384
+[ "$ORCH_RAM_MB" -lt 2048 ] && ORCH_RAM_MB=2048
+# Give 75% of host CPUs (min 2)
+ORCH_CPUS=$(( CPU_CORES * 3 / 4 ))
+[ "$ORCH_CPUS" -lt 2 ] && ORCH_CPUS=2
 
 echo "════════════════════════════════════════════════════════"
-echo "  DevShot Cell — Native Mac (QEMU/HVF, no Xen)"
+echo "  DevShot Cell — Mac Sandboxed Orchestrator (HVF)"
 echo "════════════════════════════════════════════════════════"
 echo "  CPU:        ${CPU_MODEL}"
 echo "  Host RAM:   ${TOTAL_RAM_MB}MB  CPUs: ${CPU_CORES}"
+echo "  Orch RAM:   ${ORCH_RAM_MB}MB   CPUs: ${ORCH_CPUS}"
 echo "  Server ID:  ${DEVSHOT_SERVER_ID}"
 echo "  Tunnel URL: ${DEVSHOT_TUNNEL_URL}"
 echo "  Pool size:  ${POOL_SIZE}"
 echo "  Accel:      HVF (Apple Hypervisor.framework)"
-echo "  Backend:    QEMU (direct, no Xen nesting)"
+echo "  Backend:    Sandboxed Alpine VM → nested QEMU pool VMs"
 echo "  Work dir:   ${WORK_DIR}"
 echo "════════════════════════════════════════════════════════"
 echo ""
 
+# ── Write agent environment to a file (shared via 9p) ──────────────────────
+cat > "${BOOT_DIR}/agent.env" <<ENVEOF
+DEVSHOT_SERVER_ID=${DEVSHOT_SERVER_ID}
+DEVSHOT_HMAC_SECRET=${DEVSHOT_HMAC_SECRET}
+DEVSHOT_TUNNEL_URL=${DEVSHOT_TUNNEL_URL}
+DEVSHOT_TLS_SKIP=${DEVSHOT_TLS_SKIP}
+POOL_SIZE=${POOL_SIZE}
+LOG_LEVEL=${LOG_LEVEL}
+WEBRTC_STUN_URL=${WEBRTC_STUN_URL:-stun:stun.cloudflare.com:3478}
+WEBRTC_TURN_URL=${WEBRTC_TURN_URL:-}
+WEBRTC_TURN_SECRET=${WEBRTC_TURN_SECRET:-}
+ENVEOF
+chmod 600 "${BOOT_DIR}/agent.env"
+
 # ── Graceful shutdown ────────────────────────────────────────────────────────
 cleanup() {
   echo ""
-  echo "Shutting down..."
-  [ -n "${AGENT_PID:-}" ] && kill "$AGENT_PID" 2>/dev/null || true
+  echo "Shutting down orchestrator VM..."
+  [ -n "${ORCH_PID:-}" ] && kill "$ORCH_PID" 2>/dev/null || true
   wait 2>/dev/null || true
   echo "Cell stopped."
   exit 0
 }
 trap cleanup TERM INT
 
-# ── Export env for the agent ────────────────────────────────────────────────
-export DEVSHOT_SERVER_ID
-export DEVSHOT_HMAC_SECRET
-export DEVSHOT_TUNNEL_URL
-export DEVSHOT_TLS_SKIP
-export POOL_SIZE
-export LOG_LEVEL
-export GUESTS_DIR="${WORK_DIR}/guests"
-export BASE_IMAGE="${WORK_DIR}/devshot-guest-base.qcow2"
-export KERNEL="${WORK_DIR}/Image-domu"
-export BRIDGE=""  # No bridge on Mac; use user-mode networking
-export DEVSHOT_QEMU_RUNTIME="${WORK_DIR}/qemu"
+# ── Launch the orchestrator QEMU VM ────────────────────────────────────────
+# The agent runs INSIDE this VM (Alpine + QEMU + ClamAV + YARA).
+# Pool VMs are nested QEMU processes inside the orchestrator VM.
+# Boot artifacts (kernel, base image) are shared from host via virtio-9p.
+echo "Starting orchestrator VM (Alpine + agent + QEMU + ClamAV + YARA)..."
 
-# ── Launch the Go agent directly ────────────────────────────────────────────
-if [ -f "${WORK_DIR}/agent" ]; then
-  echo "Starting agent (QEMU/HVF backend)..."
-  "${WORK_DIR}/agent" &
-  AGENT_PID=$!
-  echo "  Agent started (pid=${AGENT_PID})"
-  echo ""
-  echo "════════════════════════════════════════════════════════"
-  echo "  Cell running natively on Mac (HVF, no Xen)"
-  echo "  Accel:        HVF (Apple Hypervisor.framework)"
-  echo "  Server ID:    ${DEVSHOT_SERVER_ID}"
-  echo "  Tunnel:       ${DEVSHOT_TUNNEL_URL}"
-  echo "  Pool size:    ${POOL_SIZE}"
-  echo "════════════════════════════════════════════════════════"
-  echo ""
-  wait "$AGENT_PID" 2>/dev/null || {
-    echo "Agent exited. Press Ctrl-C to stop."
-    tail -f /dev/null
-  }
-else
-  echo "ERROR: No agent binary found at ${WORK_DIR}/agent"
-  echo "  Build with: cd apps/agent/go && go build -o ${WORK_DIR}/agent ."
-  exit 1
-fi
+qemu-system-aarch64 \
+  -accel hvf \
+  -machine virt,gic-version=3 \
+  -cpu host \
+  -smp "${ORCH_CPUS}" \
+  -m "${ORCH_RAM_MB}" \
+  -display none \
+  -kernel "${BOOT_DIR}/Image-domu" \
+  -append "root=/dev/vda rw console=ttyAMA0" \
+  -drive "file=${ORCH_DISK},format=qcow2,if=none,id=hd0" \
+  -device virtio-blk-device,drive=hd0 \
+  -netdev user,id=net0,hostfwd=tcp::2222-:22 \
+  -device virtio-net-device,netdev=net0 \
+  -fsdev "local,id=boot_fs,path=${BOOT_DIR},security_model=none" \
+  -device virtio-9p-device,fsdev=boot_fs,mount_tag=devshot_boot \
+  -chardev "socket,id=s0,path=${WORK_DIR}/orch-console.sock,server=on,wait=off" \
+  -serial chardev:s0 \
+  -chardev "socket,id=qmp0,path=${WORK_DIR}/orch-monitor.sock,server=on,wait=off" \
+  -mon chardev=qmp0,mode=control \
+  -pidfile "${WORK_DIR}/orch.pid" \
+  -daemonize
+
+ORCH_PID=$(cat "${WORK_DIR}/orch.pid" 2>/dev/null)
+echo "  Orchestrator VM started (pid=${ORCH_PID})"
+echo ""
+echo "════════════════════════════════════════════════════════"
+echo "  Cell running in sandboxed Alpine VM (HVF)"
+echo "  Accel:       HVF (Apple Hypervisor.framework)"
+echo "  Server ID:   ${DEVSHOT_SERVER_ID}"
+echo "  Tunnel:      ${DEVSHOT_TUNNEL_URL}"
+echo "  Pool size:   ${POOL_SIZE}"
+echo "  SSH:         ssh root@localhost -p 2222"
+echo "  Console:     socat - UNIX:${WORK_DIR}/orch-console.sock"
+echo "════════════════════════════════════════════════════════"
+echo ""
+
+# Wait for the orchestrator VM process
+wait "$ORCH_PID" 2>/dev/null || {
+  echo "Orchestrator VM exited. Press Ctrl-C to stop."
+  tail -f /dev/null
+}

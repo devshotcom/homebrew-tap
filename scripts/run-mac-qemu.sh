@@ -87,9 +87,22 @@ mkdir -p "${BOOT_DIR}"
 cp "${BUILD_DIR}/Image-domu" "${BOOT_DIR}/Image-domu" 2>/dev/null || true
 cp "${BUILD_DIR}/devshot-guest-base.qcow2" "${BOOT_DIR}/devshot-guest-base.qcow2" 2>/dev/null || true
 
+# Ship a fresh agent binary via 9p so the orchestrator can prefer it over the
+# one baked into the image — lets us iterate on the agent without rebuilding
+# the orchestrator qcow2 every time (the start-orchestrator.sh init script
+# checks for this file and copies it over /opt/devshot/agent on boot).
+# Fall back to the legacy `devshot-agent` name for older Homebrew bottles.
+for cand in "${BUILD_DIR}/devshot-agent" "${BUILD_DIR}/devshot-agent-linux-arm64"; do
+  if [ -f "$cand" ]; then
+    cp "$cand" "${BOOT_DIR}/agent" && chmod 755 "${BOOT_DIR}/agent"
+    break
+  fi
+done
+
 # Orchestrator qcow2 image (Alpine + agent + QEMU + ClamAV + YARA)
 ORCH_BASE="${BUILD_DIR}/orchestrator-mac.qcow2"
 ORCH_DISK="${WORK_DIR}/orchestrator.qcow2"
+ORCH_STAMP="${ORCH_DISK}.base-stamp"
 if [ ! -f "$ORCH_BASE" ]; then
   echo "ERROR: Missing orchestrator image at ${ORCH_BASE}"
   echo "  Build with: cd apps/agent && docker buildx build --platform linux/arm64 \\"
@@ -97,8 +110,12 @@ if [ ! -f "$ORCH_BASE" ]; then
   exit 1
 fi
 # Create CoW overlay so the base image stays clean across restarts
-if [ ! -f "$ORCH_DISK" ]; then
+ORCH_BASE_SIG=$(stat -f '%m:%z' "$ORCH_BASE" 2>/dev/null || stat -c '%Y:%s' "$ORCH_BASE" 2>/dev/null || echo unknown)
+ORCH_DISK_SIG=$(cat "$ORCH_STAMP" 2>/dev/null || true)
+if [ ! -f "$ORCH_DISK" ] || [ "$ORCH_BASE_SIG" != "$ORCH_DISK_SIG" ]; then
+  rm -f "$ORCH_DISK"
   qemu-img create -f qcow2 -b "$ORCH_BASE" -F qcow2 "$ORCH_DISK"
+  printf '%s\n' "$ORCH_BASE_SIG" > "$ORCH_STAMP"
 fi
 
 # ── Orchestrator VM sizing ─────────────────────────────────────────────────
@@ -129,6 +146,12 @@ echo "════════════════════════�
 echo ""
 
 # ── Write agent environment to a file (shared via 9p) ──────────────────────
+# Inside the orchestrator QEMU guest, `host.docker.internal` resolves to the
+# Mac host via 10.0.2.2. Prefer that path for local coturn/STUN so agent-side
+# WebRTC can gather relay candidates deterministically in dev.
+AGENT_WEBRTC_STUN_URL="${WEBRTC_STUN_URL:-stun:host.docker.internal:3478}"
+AGENT_WEBRTC_TURN_URL="${WEBRTC_TURN_URL:-${WEBRTC_TURN_URL_QEMU:-${WEBRTC_TURN_URL_DOCKER:-turn:host.docker.internal:3478}}}"
+
 cat > "${BOOT_DIR}/agent.env" <<ENVEOF
 DEVSHOT_SERVER_ID=${DEVSHOT_SERVER_ID}
 DEVSHOT_HMAC_SECRET=${DEVSHOT_HMAC_SECRET}
@@ -136,9 +159,10 @@ DEVSHOT_TUNNEL_URL=${DEVSHOT_TUNNEL_URL}
 DEVSHOT_TLS_SKIP=${DEVSHOT_TLS_SKIP}
 POOL_SIZE=${POOL_SIZE}
 LOG_LEVEL=${LOG_LEVEL}
-WEBRTC_STUN_URL=${WEBRTC_STUN_URL:-stun:stun.cloudflare.com:3478}
-WEBRTC_TURN_URL=${WEBRTC_TURN_URL:-}
+WEBRTC_STUN_URL=${AGENT_WEBRTC_STUN_URL}
+WEBRTC_TURN_URL=${AGENT_WEBRTC_TURN_URL}
 WEBRTC_TURN_SECRET=${WEBRTC_TURN_SECRET:-}
+WEBRTC_FORCE_RELAY=${WEBRTC_FORCE_RELAY:-}
 ENVEOF
 chmod 600 "${BOOT_DIR}/agent.env"
 
@@ -174,10 +198,13 @@ qemu-system-aarch64 \
   -device virtio-net-device,netdev=net0 \
   -fsdev "local,id=boot_fs,path=${BOOT_DIR},security_model=none" \
   -device virtio-9p-device,fsdev=boot_fs,mount_tag=devshot_boot \
-  -chardev "socket,id=s0,path=${WORK_DIR}/orch-console.sock,server=on,wait=off" \
+  -chardev "socket,id=s0,path=${WORK_DIR}/orch-console.sock,server=on,wait=off,logfile=${BOOT_DIR}/dom0-console.log,logappend=on" \
   -serial chardev:s0 \
   -chardev "socket,id=qmp0,path=${WORK_DIR}/orch-monitor.sock,server=on,wait=off" \
   -mon chardev=qmp0,mode=control \
+  -device virtio-serial-device \
+  -chardev "socket,id=qga0,path=${WORK_DIR}/orch-qga.sock,server=on,wait=off" \
+  -device virtserialport,chardev=qga0,name=org.qemu.guest_agent.0 \
   -pidfile "${WORK_DIR}/orch.pid" \
   -daemonize
 
@@ -195,8 +222,12 @@ echo "  Console:     socat - UNIX:${WORK_DIR}/orch-console.sock"
 echo "════════════════════════════════════════════════════════"
 echo ""
 
-# Wait for the orchestrator VM process
-wait "$ORCH_PID" 2>/dev/null || {
-  echo "Orchestrator VM exited. Press Ctrl-C to stop."
-  tail -f /dev/null
-}
+# qemu-system-aarch64 was daemonized, so its pid is not a waitable child of
+# this shell. Poll it instead; `wait $ORCH_PID` returns immediately on macOS
+# and makes a healthy VM look like it exited.
+while kill -0 "$ORCH_PID" 2>/dev/null; do
+  sleep 2
+done
+
+echo "Orchestrator VM exited. Press Ctrl-C to stop."
+tail -f /dev/null

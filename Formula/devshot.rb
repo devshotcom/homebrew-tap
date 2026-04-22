@@ -1,10 +1,10 @@
 class Devshot < Formula
   desc "Dev environment VMs with hardware-accelerated HVF on Mac"
   homepage "https://devshot.com"
-  url "https://github.com/devshotcom/homebrew-tap/releases/download/v0.3.0/devshot-macos-arm64-qemu.tar.gz"
-  sha256 "d7c31b386f9d76787437ff0212be92f60a24419100db3f2dda5e2a4162079da1"
+  url "https://github.com/devshotcom/homebrew-tap/releases/download/v0.1.0/devshot-macos-arm64-qemu.tar.gz"
+  sha256 "5d088e546b7f79a27a5eb84be1df0f6a63e33c63e978a8df11cecd87ea8e4108"
   license "MIT"
-  version "0.3.0"
+  version "0.3.1"
 
   depends_on "qemu"
   depends_on :macos
@@ -12,8 +12,8 @@ class Devshot < Formula
 
   def install
     bin.install "run-mac-qemu.sh" => "devshot-run"
-    libexec.install "devshot-agent"
     (var/"devshot").mkpath
+    (var/"devshot").install "orchestrator-mac.qcow2"
     (var/"devshot").install "Image-domu"
     (var/"devshot").install "devshot-guest-base.qcow2"
     (etc/"devshot").mkpath
@@ -26,20 +26,19 @@ class Devshot < Formula
         run)
           shift
           export BUILD_DIR="#{var}/devshot"
-          export DEVSHOT_SANDBOX_PROFILE="#{etc}/devshot/devshot-vmm-qemu.sb"
           mkdir -p "$BUILD_DIR"
-          cp "#{libexec}/devshot-agent" "$BUILD_DIR/devshot-agent" 2>/dev/null || true
-          cp "#{var}/devshot/Image-domu" "$BUILD_DIR/Image-domu" 2>/dev/null || true
-          cp "#{var}/devshot/devshot-guest-base.qcow2" "$BUILD_DIR/devshot-guest-base.qcow2" 2>/dev/null || true
           exec "#{bin}/devshot-run" "$@"
           ;;
-        version) echo "devshot #{version} (Homebrew, QEMU/HVF backend)" ;;
+        version) echo "devshot #{version} (Homebrew, sandboxed Alpine orchestrator)" ;;
         *)
-          echo "DevShot - dev environment VMs on Apple Silicon"
+          echo "DevShot - sandboxed dev environment VMs on Apple Silicon"
           echo ""
           echo "Usage:"
-          echo "  devshot run      Start the DevShot agent with QEMU/HVF backend"
+          echo "  devshot run      Start the sandboxed orchestrator VM (Alpine + QEMU + ClamAV + YARA)"
           echo "  devshot version  Show version"
+          echo ""
+          echo "The agent runs INSIDE a sandboxed Alpine VM (not on the Mac host)."
+          echo "Pool VMs spawn as nested QEMU instances inside the orchestrator."
           echo ""
           echo "Required env vars:"
           echo "  DEVSHOT_SERVER_ID    Your server ID from console.devshot.com"
@@ -52,7 +51,11 @@ class Devshot < Formula
 
   def caveats
     <<~EOS
-      DevShot native Mac installer (QEMU/HVF, no Docker needed).
+      DevShot sandboxed Mac installer (QEMU/HVF orchestrator VM).
+
+      The agent runs inside an Alpine Linux VM with ClamAV + YARA.
+      Pool VMs spawn as nested QEMU instances inside the orchestrator.
+      No code runs directly on the Mac host.
 
       To start:
         DEVSHOT_SERVER_ID=<id> DEVSHOT_HMAC_SECRET=<secret> devshot run

@@ -1,8 +1,8 @@
 class Devshot < Formula
   desc "Dev environment VMs with hardware-accelerated HVF on Mac"
   homepage "https://devshot.com"
-  url "https://github.com/devshotcom/homebrew-tap/releases/download/v0.1.0/devshot-macos-arm64-qemu.tar.gz"
-  sha256 "5d088e546b7f79a27a5eb84be1df0f6a63e33c63e978a8df11cecd87ea8e4108"
+  url "https://github.com/devshotcom/homebrew-tap/releases/download/v0.3.71/devshot-macos-arm64-qemu.tar.gz"
+  sha256 "cdb4e1768bc309c7cc4d4f29a2fbe6f2d589b38ff15fab93e245879cb3dc05b8"
   license "MIT"
   version "0.3.71"
 

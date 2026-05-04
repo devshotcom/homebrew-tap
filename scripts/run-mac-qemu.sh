@@ -191,11 +191,18 @@ echo "════════════════════════�
 echo ""
 
 # ── Write agent environment to a file (shared via 9p) ──────────────────────
-# Inside the orchestrator QEMU guest, `host.docker.internal` resolves to the
-# Mac host via 10.0.2.2. Prefer that path for local coturn/STUN so agent-side
-# WebRTC can gather relay candidates deterministically in dev.
-AGENT_WEBRTC_STUN_URL="${WEBRTC_STUN_URL:-stun:host.docker.internal:3478}"
-AGENT_WEBRTC_TURN_URL="${WEBRTC_TURN_URL:-${WEBRTC_TURN_URL_QEMU:-${WEBRTC_TURN_URL_DOCKER:-turn:host.docker.internal:3478}}}"
+# Inside the orchestrator QEMU guest the host is reachable via 10.0.2.2
+# (QEMU user-mode networking gateway). `host.docker.internal` is a Docker
+# Desktop /etc/hosts entry on the HOST and is NOT resolvable from inside
+# the guest, so any callers that pass that DNS name (dev.sh defaults,
+# console-pasted commands assuming Docker context) get rewritten here.
+# Production tunnel URLs (wss://console.devshot.com) are untouched.
+rewrite_for_qemu_guest() {
+  echo "$1" | sed 's|host\.docker\.internal|10.0.2.2|g'
+}
+DEVSHOT_TUNNEL_URL="$(rewrite_for_qemu_guest "$DEVSHOT_TUNNEL_URL")"
+AGENT_WEBRTC_STUN_URL="$(rewrite_for_qemu_guest "${WEBRTC_STUN_URL:-stun:10.0.2.2:3478}")"
+AGENT_WEBRTC_TURN_URL="$(rewrite_for_qemu_guest "${WEBRTC_TURN_URL:-${WEBRTC_TURN_URL_QEMU:-${WEBRTC_TURN_URL_DOCKER:-turn:10.0.2.2:3478}}}")"
 
 cat > "${BOOT_DIR}/agent.env" <<ENVEOF
 DEVSHOT_SERVER_ID=${DEVSHOT_SERVER_ID}

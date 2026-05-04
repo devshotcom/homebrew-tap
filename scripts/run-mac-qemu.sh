@@ -60,6 +60,51 @@ export DEVSHOT_HYPERVISOR=qemu
 export ROLE=dom0
 export XS_REAL=0
 
+# ── Spec 048 — auto-update prompt + recent-failure warning ─────────────────
+# Both run only on a TTY: scripted invocations (CI, automation, supervisor
+# daemons) skip the interactive bits silently.
+if [ -t 0 ] && [ -t 1 ]; then
+  AUTOUPDATE_PLIST="$HOME/Library/LaunchAgents/com.devshot.autoupdate.plist"
+  AUTOUPDATE_LOG="$HOME/Library/Logs/devshot-autoupdate.log"
+  AUTOUPDATE_SKIP="$HOME/.devshot/autoupdate-skip"
+
+  # Failure warning first (informational; runs every interactive launch).
+  if [ -f "$AUTOUPDATE_PLIST" ] && [ -f "$AUTOUPDATE_LOG" ]; then
+    LAST_LOG_TS=$(stat -f '%m' "$AUTOUPDATE_LOG" 2>/dev/null || echo 0)
+    NOW_TS=$(date +%s)
+    AGE_DAYS=$(( (NOW_TS - LAST_LOG_TS) / 86400 ))
+    LAST_LINE=$(tail -n 1 "$AUTOUPDATE_LOG" 2>/dev/null || echo "")
+    if [ "$AGE_DAYS" -le 7 ] && [ -n "$LAST_LINE" ] \
+       && echo "$LAST_LINE" | grep -qiE 'error|fail|cannot|not found'; then
+      printf '\033[33m[autoupdate] Last attempt looks like a failure — see %s\033[0m\n' "$AUTOUPDATE_LOG" >&2
+    fi
+  fi
+
+  # First-run prompt: ask once, persist user intent.
+  if [ ! -f "$AUTOUPDATE_PLIST" ] && [ ! -f "$AUTOUPDATE_SKIP" ]; then
+    printf '\n'
+    printf 'DevShot can auto-update itself daily so the agent stays current.\n'
+    printf 'It runs `brew upgrade devshot` at 03:NN local time (random NN).\n'
+    printf 'The in-VM agent picks up the new binary on its next reconnect cycle.\n\n'
+    printf 'Enable daily auto-update? [Y/n] '
+    # Read with a 30s timeout — if the user is piping input or wandered off,
+    # default to enabled (matches spec 047's auto_update_mode='auto' default).
+    if read -r -t 30 ANSWER; then :; else ANSWER=""; fi
+    case "${ANSWER:-y}" in
+      [Yy]*|"")
+        if command -v devshot >/dev/null 2>&1; then
+          devshot autoupdate enable || true
+        fi
+        ;;
+      *)
+        mkdir -p "$HOME/.devshot"
+        : > "$AUTOUPDATE_SKIP"
+        printf 'Auto-update opt-out recorded. Re-enable any time: `devshot autoupdate enable`\n\n'
+        ;;
+    esac
+  fi
+fi
+
 # ── Working directory ───────────────────────────────────────────────────────
 WORK_DIR="${BUILD_DIR}/mac-run-qemu"
 mkdir -p "${WORK_DIR}/qemu" "${WORK_DIR}/guests" "${WORK_DIR}/xenstore-dom0"

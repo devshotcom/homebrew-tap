@@ -4,7 +4,7 @@ class Devshot < Formula
   url "https://github.com/devshotcom/homebrew-tap/releases/download/v0.1.0/devshot-macos-arm64-qemu.tar.gz"
   sha256 "5d088e546b7f79a27a5eb84be1df0f6a63e33c63e978a8df11cecd87ea8e4108"
   license "MIT"
-  version "0.4.1"
+  version "0.4.2"
 
   depends_on "qemu"
   depends_on :macos
@@ -16,6 +16,13 @@ class Devshot < Formula
     (var/"devshot").install "orchestrator-mac.qcow2"
     (var/"devshot").install "Image-domu"
     (var/"devshot").install "devshot-guest-base.qcow2"
+    # Spec 047 — install the agent binary standalone in BUILD_DIR. The
+    # launcher's existing 9p override loop then ships the freshly-upgraded
+    # binary into the orchestrator VM at /xen/boot/agent, where the in-VM
+    # init script copies it over the baked one on each OpenRC respawn.
+    # That's how `brew upgrade devshot` actually reaches sharp-ada without
+    # rebuilding the qcow2.
+    (var/"devshot").install "devshot-agent"
     (etc/"devshot").mkpath
     (etc/"devshot").install "devshot-vmm-qemu.sb"
 

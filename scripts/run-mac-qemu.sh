@@ -132,6 +132,15 @@ mkdir -p "${BOOT_DIR}"
 cp "${BUILD_DIR}/Image-domu" "${BOOT_DIR}/Image-domu" 2>/dev/null || true
 cp "${BUILD_DIR}/devshot-guest-base.qcow2" "${BOOT_DIR}/devshot-guest-base.qcow2" 2>/dev/null || true
 
+# Pre-baked flavored templates (n8n, flowise, desktop, …) are produced
+# by `make build-templates` into ${BUILD_DIR}/mac-run-qemu/guests/templates
+# and shared with the orchestrator over a separate 9p channel so they
+# show up in the pool image dropdown without rebuilding the orchestrator
+# qcow2. The dir must exist before QEMU launches even if it's empty —
+# the 9p export refuses to start otherwise.
+TEMPLATES_DIR="${WORK_DIR}/guests/templates"
+mkdir -p "${TEMPLATES_DIR}"
+
 # Ship a fresh agent binary via 9p so the orchestrator can prefer it over the
 # one baked into the image — lets us iterate on the agent without rebuilding
 # the orchestrator qcow2 every time (the start-orchestrator.sh init script
@@ -211,6 +220,15 @@ DEVSHOT_TUNNEL_URL=${DEVSHOT_TUNNEL_URL}
 DEVSHOT_TLS_SKIP=${DEVSHOT_TLS_SKIP}
 POOL_SIZE=${POOL_SIZE}
 LOG_LEVEL=${LOG_LEVEL}
+# Nested TCG (the orchestrator runs under HVF, but pool VMs themselves
+# run TCG-on-TCG since KVM isn't available inside the orchestrator).
+# A vanilla 21 MiB Alpine boots in ~30s, but the desktop template adds
+# ~260 MiB of packages and tigervnc + openbox + tint2 startup, which
+# pushes total boot to 3-4 min. The 2 min default trips QGA WaitReady,
+# the agent reports CreateVM failure, the console retry loop fires
+# again and on-demand claim spawns yet another VM — runaway. Bump to
+# 10 min so spawns succeed first time.
+READY_TIMEOUT=${READY_TIMEOUT:-600000}
 WEBRTC_STUN_URL=${AGENT_WEBRTC_STUN_URL}
 WEBRTC_TURN_URL=${AGENT_WEBRTC_TURN_URL}
 WEBRTC_TURN_SECRET=${WEBRTC_TURN_SECRET:-}
@@ -250,6 +268,8 @@ qemu-system-aarch64 \
   -device virtio-net-device,netdev=net0 \
   -fsdev "local,id=boot_fs,path=${BOOT_DIR},security_model=none" \
   -device virtio-9p-device,fsdev=boot_fs,mount_tag=devshot_boot \
+  -fsdev "local,id=tmpl_fs,path=${TEMPLATES_DIR},security_model=none" \
+  -device virtio-9p-device,fsdev=tmpl_fs,mount_tag=devshot_templates \
   -chardev "socket,id=s0,path=${WORK_DIR}/orch-console.sock,server=on,wait=off,logfile=${BOOT_DIR}/dom0-console.log,logappend=on" \
   -serial chardev:s0 \
   -chardev "socket,id=qmp0,path=${WORK_DIR}/orch-monitor.sock,server=on,wait=off" \

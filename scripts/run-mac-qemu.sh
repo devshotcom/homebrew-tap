@@ -233,6 +233,14 @@ WEBRTC_STUN_URL=${AGENT_WEBRTC_STUN_URL}
 WEBRTC_TURN_URL=${AGENT_WEBRTC_TURN_URL}
 WEBRTC_TURN_SECRET=${WEBRTC_TURN_SECRET:-}
 WEBRTC_FORCE_RELAY=${WEBRTC_FORCE_RELAY:-}
+# Bakery: 9p-share the orch's apk fetch cache into bake VMs as the
+# `apk_cache` mount tag. Recipes mount it read-only at /tmp/apkcache
+# and run \`apk add --no-network --allow-untrusted /tmp/apkcache/*.apk\`
+# instead of going through slirp's nested NAT (which loses big TCP
+# transfers reliably — anything over ~300 KB drops with "connection
+# closed prematurely"). Empty / missing dir leaves the mount off so
+# production / Linux dom0 keeps its existing internet-fetch path.
+BAKE_APK_CACHE_DIR=/xen/boot/apk-cache
 ENVEOF
 chmod 600 "${BOOT_DIR}/agent.env"
 

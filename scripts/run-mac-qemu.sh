@@ -52,7 +52,9 @@ done
 : "${DEVSHOT_HMAC_SECRET:?ERROR: DEVSHOT_HMAC_SECRET is required.}"
 DEVSHOT_TUNNEL_URL="${DEVSHOT_TUNNEL_URL:-wss://console.devshot.com}"
 DEVSHOT_TLS_SKIP="${DEVSHOT_TLS_SKIP:-0}"
-POOL_SIZE="${POOL_SIZE:-2}"
+# Pool size is owned by the console (servers.pool_size in DB, pushed via
+# tunnel-server's config message on every dom0 connect). The agent no
+# longer reads POOL_SIZE from env — see apps/agent/go/vmmanager.go.
 LOG_LEVEL="${LOG_LEVEL:-info}"
 
 # Force QEMU backend
@@ -192,7 +194,7 @@ echo "  Host RAM:   ${TOTAL_RAM_MB}MB  CPUs: ${CPU_CORES}"
 echo "  Orch RAM:   ${ORCH_RAM_MB}MB   CPUs: ${ORCH_CPUS}"
 echo "  Server ID:  ${DEVSHOT_SERVER_ID}"
 echo "  Tunnel URL: ${DEVSHOT_TUNNEL_URL}"
-echo "  Pool size:  ${POOL_SIZE}"
+echo "  Pool size:  (set by console — pushed via tunnel config on connect)"
 echo "  Accel:      HVF (Apple Hypervisor.framework)"
 echo "  Backend:    Sandboxed Alpine VM → nested QEMU pool VMs"
 echo "  Work dir:   ${WORK_DIR}"
@@ -218,7 +220,11 @@ DEVSHOT_SERVER_ID=${DEVSHOT_SERVER_ID}
 DEVSHOT_HMAC_SECRET=${DEVSHOT_HMAC_SECRET}
 DEVSHOT_TUNNEL_URL=${DEVSHOT_TUNNEL_URL}
 DEVSHOT_TLS_SKIP=${DEVSHOT_TLS_SKIP}
-POOL_SIZE=${POOL_SIZE}
+# POOL_SIZE intentionally NOT written: the agent reads its pool target
+# from the console's `config` push (servers.pool_size in the DB),
+# never from env. Writing POOL_SIZE here would have no effect and
+# would only mislead operators reading agent.env about the source of
+# truth. See apps/agent/go/vmmanager.go for the matching code change.
 LOG_LEVEL=${LOG_LEVEL}
 # Nested TCG (the orchestrator runs under HVF, but pool VMs themselves
 # run TCG-on-TCG since KVM isn't available inside the orchestrator).
@@ -296,7 +302,7 @@ echo "  Cell running in sandboxed Alpine VM (HVF)"
 echo "  Accel:       HVF (Apple Hypervisor.framework)"
 echo "  Server ID:   ${DEVSHOT_SERVER_ID}"
 echo "  Tunnel:      ${DEVSHOT_TUNNEL_URL}"
-echo "  Pool size:   ${POOL_SIZE}"
+echo "  Pool size:   (set by console — pushed via tunnel config on connect)"
 echo "  SSH:         ssh root@localhost -p 2222"
 echo "  Console:     socat - UNIX:${WORK_DIR}/orch-console.sock"
 echo "════════════════════════════════════════════════════════"

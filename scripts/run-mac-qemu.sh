@@ -221,7 +221,7 @@ DEVSHOT_HMAC_SECRET=${DEVSHOT_HMAC_SECRET}
 DEVSHOT_TUNNEL_URL=${DEVSHOT_TUNNEL_URL}
 DEVSHOT_TLS_SKIP=${DEVSHOT_TLS_SKIP}
 # POOL_SIZE intentionally NOT written: the agent reads its pool target
-# from the console's `config` push (servers.pool_size in the DB),
+# from the console's \`config\` push (servers.pool_size in the DB),
 # never from env. Writing POOL_SIZE here would have no effect and
 # would only mislead operators reading agent.env about the source of
 # truth. See apps/agent/go/vmmanager.go for the matching code change.
@@ -240,7 +240,7 @@ WEBRTC_TURN_URL=${AGENT_WEBRTC_TURN_URL}
 WEBRTC_TURN_SECRET=${WEBRTC_TURN_SECRET:-}
 WEBRTC_FORCE_RELAY=${WEBRTC_FORCE_RELAY:-}
 # Bakery: 9p-share the orch's apk fetch cache into bake VMs as the
-# `apk_cache` mount tag. Recipes mount it read-only at /tmp/apkcache
+# \`apk_cache\` mount tag. Recipes mount it read-only at /tmp/apkcache
 # and run \`apk add --no-network --allow-untrusted /tmp/apkcache/*.apk\`
 # instead of going through slirp's nested NAT (which loses big TCP
 # transfers reliably — anything over ~300 KB drops with "connection
@@ -254,6 +254,7 @@ chmod 600 "${BOOT_DIR}/agent.env"
 cleanup() {
   echo ""
   echo "Shutting down orchestrator VM..."
+  [ -n "${CLOCK_SYNC_PID:-}" ] && kill "$CLOCK_SYNC_PID" 2>/dev/null || true
   [ -n "${ORCH_PID:-}" ] && kill "$ORCH_PID" 2>/dev/null || true
   wait 2>/dev/null || true
   echo "Cell stopped."
@@ -296,6 +297,30 @@ qemu-system-aarch64 \
 
 ORCH_PID=$(cat "${WORK_DIR}/orch.pid" 2>/dev/null)
 echo "  Orchestrator VM started (pid=${ORCH_PID})"
+
+# ── Periodic dom0 clock sync ────────────────────────────────────────────────
+# Nested QEMU clocks drift badly on Mac, especially across host sleep cycles.
+# When dom0 falls more than 60 s out of sync with the host the agent's
+# spec-027 client-auth freshness check (`VerifyClientResponse` ±60 s window)
+# starts rejecting otherwise-valid browser responses with reason "expired",
+# which surfaces in the iframe as a "channel CLOSED after 21B" proxy error.
+# Push host wall time into dom0 every 30 s via QGA `guest-set-time` to keep
+# drift below the threshold. The QGA socket appears as soon as dom0 boots;
+# until then `nc -U` no-ops.
+sync_dom0_clock() {
+  local sock="${WORK_DIR}/orch-qga.sock"
+  while kill -0 "$ORCH_PID" 2>/dev/null; do
+    if [ -S "$sock" ]; then
+      local ns="$(date -u +%s)000000000"
+      ( printf '{"execute":"guest-set-time","arguments":{"time":%s}}' "$ns"; sleep 0.2 ) \
+        | nc -U "$sock" >/dev/null 2>&1 || true
+    fi
+    sleep 30
+  done
+}
+sync_dom0_clock &
+CLOCK_SYNC_PID=$!
+
 echo ""
 echo "════════════════════════════════════════════════════════"
 echo "  Cell running in sandboxed Alpine VM (HVF)"

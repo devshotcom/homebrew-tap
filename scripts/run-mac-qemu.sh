@@ -175,16 +175,26 @@ if [ ! -f "$ORCH_DISK" ] || [ "$ORCH_BASE_SIG" != "$ORCH_DISK_SIG" ]; then
 fi
 
 # ── Orchestrator VM sizing ─────────────────────────────────────────────────
+# Defaults to 75% of host (cap 16 GB / floor 2 GB; CPU floor 2). Env
+# overrides DEVSHOT_ORCH_CPUS / DEVSHOT_ORCH_RAM_MB skip the auto-sizing —
+# `make dev` passes 1 / 2048 because nested pool VMs run TCG, so a bigger
+# orch just idle-spins more host cores instead of speeding anything up.
 CPU_MODEL=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo 'Apple Silicon')
 TOTAL_RAM_MB=$(( $(sysctl -n hw.memsize) / 1024 / 1024 ))
 CPU_CORES=$(sysctl -n hw.ncpu)
-# Give the orchestrator VM 75% of host RAM (capped at 16GB), leave rest for host
-ORCH_RAM_MB=$(( TOTAL_RAM_MB * 3 / 4 ))
-[ "$ORCH_RAM_MB" -gt 16384 ] && ORCH_RAM_MB=16384
-[ "$ORCH_RAM_MB" -lt 2048 ] && ORCH_RAM_MB=2048
-# Give 75% of host CPUs (min 2)
-ORCH_CPUS=$(( CPU_CORES * 3 / 4 ))
-[ "$ORCH_CPUS" -lt 2 ] && ORCH_CPUS=2
+if [ -n "${DEVSHOT_ORCH_RAM_MB:-}" ]; then
+  ORCH_RAM_MB="$DEVSHOT_ORCH_RAM_MB"
+else
+  ORCH_RAM_MB=$(( TOTAL_RAM_MB * 3 / 4 ))
+  [ "$ORCH_RAM_MB" -gt 16384 ] && ORCH_RAM_MB=16384
+  [ "$ORCH_RAM_MB" -lt 2048 ] && ORCH_RAM_MB=2048
+fi
+if [ -n "${DEVSHOT_ORCH_CPUS:-}" ]; then
+  ORCH_CPUS="$DEVSHOT_ORCH_CPUS"
+else
+  ORCH_CPUS=$(( CPU_CORES * 3 / 4 ))
+  [ "$ORCH_CPUS" -lt 2 ] && ORCH_CPUS=2
+fi
 
 echo "════════════════════════════════════════════════════════"
 echo "  DevShot Cell — Mac Sandboxed Orchestrator (HVF)"

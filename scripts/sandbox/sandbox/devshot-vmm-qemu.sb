@@ -1,87 +1,80 @@
 ;; devshot-vmm-qemu.sb — macOS sandbox-exec profile for QEMU VM
-;; subprocesses on Apple Silicon. Spec 038 FR-015.
+;; subprocesses on Apple Silicon. Spec 038 FR-015 (Darwin variant).
 ;;
-;; This profile is the macOS equivalent of the Linux AppArmor +
-;; seccomp + namespace stack. It denies everything by default and
-;; permits only the operations QEMU needs to boot an Alpine guest
-;; with virtio-blk, virtio-net (user-mode), virtio-9p, and serial
-;; console on a unix socket.
+;; macOS sandbox-exec uses TinyScheme syntax (SBPL). It is undocumented
+;; and changes between macOS releases; the safest approach is to import
+;; Apple's baseline `system.sb` for the dyld + syscall + bootstrap
+;; permissions every Mach-O needs to start, then layer file-system
+;; restrictions on top. Trying to enumerate every dyld cache path
+;; ourselves leads to silent SIGABRT crashes in dyld4::CacheFinder
+;; whenever Apple shuffles the cache layout (which they do constantly).
+;;
+;; Threat model: keep a misbehaving QEMU from writing outside its
+;; per-VM runtime directory or reading other VMs' state. Hypervisor.
+;; framework + user-mode networking otherwise behave as on the host.
 ;;
 ;; Usage: sandbox-exec -f devshot-vmm-qemu.sb qemu-system-aarch64 ...
-;;
-;; macOS sandbox-exec uses TinyScheme syntax — not SBPL.
 
 (version 1)
+(import "system.sb")
 
-;; Deny everything by default.
-(deny default)
-
-;; Allow reading system libraries and frameworks that QEMU links.
-(allow file-read*
-  (subpath "/usr/lib")
-  (subpath "/usr/local/lib")
-  (subpath "/opt/homebrew/lib")
-  (subpath "/System/Library/Frameworks")
-  (subpath "/Library/Apple/usr/lib")
-  (literal "/dev/null")
-  (literal "/dev/zero")
-  (literal "/dev/urandom")
-  (literal "/dev/random")
-)
-
-;; Allow QEMU to exec itself.
-(allow process-exec
-  (literal "/opt/homebrew/bin/qemu-system-aarch64")
-  (literal "/usr/local/bin/qemu-system-aarch64")
-)
-
-;; Allow reading the kernel image and base guest disk (read-only).
-;; The exact paths are passed via env or the qemu argv; these are
-;; the common locations.
-(allow file-read*
-  (regex "^.*/Image-domu$")
-  (regex "^.*/devshot-guest-base\\.qcow2$")
-)
-
-;; Allow read-write on the per-VM runtime directory. The directory
-;; is dynamically set by run-mac-qemu.sh — we use a regex to match
-;; any path containing "qemu/<vmname>" or ".build/mac-run/qemu".
-(allow file-read* file-write*
-  (regex "^.*/qemu/pool-[0-9a-f]+/")
-  (regex "^.*/mac-run/qemu/")
-  (regex "^.*/qcow2$")      ; per-VM overlay disk
-)
-
-;; Allow unix sockets for QMP + serial console.
-(allow network-bind network-outbound
-  (regex "^.*/console\\.sock$")
-  (regex "^.*/monitor\\.sock$")
-)
-
-;; Allow user-mode networking (QEMU's -netdev user uses a socket
-;; internally for DHCP + DNS + NAT).
-(allow network-outbound
-  (remote tcp "*:*")
-  (remote udp "*:*")
-)
-(allow network-bind
-  (local tcp "127.0.0.1:*")
-  (local udp "127.0.0.1:*")
-)
-
-;; Allow access to the Hypervisor.framework (HVF).
-(allow mach-lookup
-  (global-name "com.apple.osanalytics.osanalyticshelper")
-  (global-name "com.apple.lsd.mapdb")
-  (global-name "com.apple.system.notification_center")
-)
-
-;; Allow sysctl reads (QEMU checks hw.memsize, hw.ncpu, etc.).
+;; Default: allow reads (covers dyld cache, frameworks, system libs,
+;; the qemu binary, /etc, sysctl, etc.). The interesting restrictions
+;; are on writes + per-VM read isolation.
+(allow file-read*)
+(allow process-fork process-exec)
+(allow signal (target self))
 (allow sysctl-read)
+(allow sysctl-write)
+(allow mach-lookup)
+(allow iokit-open)
+(allow ipc-posix*)
+(allow system-socket)
 
-;; Deny everything else. In particular:
-;;   - No file-write outside the runtime dir
-;;   - No process-fork (QEMU should not fork after daemonize — the
-;;     parent exits immediately, leaving the child as the VM)
-;;   - No file-read of other VMs' dirs (the regex above is per-VM)
-;;   - No signal delivery to processes outside this sandbox group
+;; Hypervisor.framework needs unrestricted Mach communication. Without
+;; this, `-accel hvf` crashes during vCPU setup.
+(allow hid-control)
+
+;; Networking: user-mode networking opens outbound TCP/UDP through the
+;; QEMU slirp stack. Inbound binds are restricted to loopback so a
+;; misconfigured forward can't expose the host to the LAN.
+;; Unix sockets: QEMU exposes the serial console, QMP monitor, and QGA
+;; channel as -chardev socket paths under the per-VM runtime dir, plus
+;; opens the same paths to read from on Destroy. Both bind and connect
+;; need the runtime-dir path explicitly allowed.
+(allow network-outbound)
+(allow network-inbound (local ip "localhost:*"))
+(allow network-bind    (local ip "localhost:*"))
+(allow network-bind
+  (regex "^.*/qemu/pool-[0-9a-f-]+/.*\\.sock$")
+  (regex "^.*/qemu/bake-[0-9a-f-]+/.*\\.sock$")
+  (regex "^.*/qemu/[a-z]+-[0-9a-f-]+/.*\\.sock$")
+  (regex "^.*/mac-run-qemu/qemu/.*\\.sock$")
+  (regex "^.*/mac-native/qemu/.*\\.sock$"))
+(allow network-outbound
+  (regex "^.*/qemu/pool-[0-9a-f-]+/.*\\.sock$")
+  (regex "^.*/qemu/bake-[0-9a-f-]+/.*\\.sock$")
+  (regex "^.*/qemu/[a-z]+-[0-9a-f-]+/.*\\.sock$")
+  (regex "^.*/mac-run-qemu/qemu/.*\\.sock$")
+  (regex "^.*/mac-native/qemu/.*\\.sock$"))
+
+;; File writes denied by default. Allow only the per-VM runtime dir,
+;; the per-VM qcow2 overlay, and a small set of paths QEMU stat()s.
+;; The runtime dir is dynamic; vmm_qemu.go names it
+;;   <DEVSHOT_QEMU_RUNTIME>/<vmname>/  (default /xen/qemu/<vmname>
+;;   on Linux, /opt/homebrew/var/devshot/mac-native/qemu/<vmname> on
+;;   the Mac-native launcher).
+(deny   file-write*)
+(allow  file-write*
+  (regex "^.*/qemu/pool-[0-9a-f-]+/")
+  (regex "^.*/qemu/bake-[0-9a-f-]+/")
+  (regex "^.*/qemu/[a-z]+-[0-9a-f-]+/")
+  (regex "^.*/mac-run-qemu/qemu/")
+  (regex "^.*/mac-native/qemu/")
+  (regex "^.*\\.qcow2$")
+  (literal "/dev/null")
+  (literal "/dev/dtracehelper")
+  (subpath "/private/tmp")
+  (subpath "/private/var/folders")
+  (subpath "/private/var/tmp")
+)
